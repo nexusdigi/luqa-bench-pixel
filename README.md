@@ -9,12 +9,21 @@ in the main LUQA repo.
 
 ## Current status
 
-Reference-connectivity stage only — `agent.py` registers a heartbeat with
-LUQA every 30s so the bench shows up as "Online" with basic diagnostics
-(CPU temp, uptime). The actual LED-testing logic (ported from the legacy LED
-QA tooling) and job dispatch (poll for a test job, run it, report results)
-land in later iterations, once the LUQA-side session/job Edge Functions
-(Phase 8 of the architecture doc) are built out further.
+Reference stage — proves connectivity and the full session lifecycle, not
+the real product yet:
+- `agent.py` heartbeats to LUQA every 30s so the bench shows up as "Online"
+  with basic diagnostics (CPU temp, uptime).
+- After each heartbeat it polls for a job. If LUQA has reserved this bench
+  for a test session, it accepts the job and runs a **fake placeholder test
+  sequence** (`FAKE_TEST_STEPS` in `agent.py` — just sleeps and reports
+  fabricated progress/measurements), then reports completion. This proves
+  `reserved -> running -> awaiting_confirmation` works end-to-end against a
+  real device.
+
+The actual LED-testing logic (ported from the legacy LED QA tooling) replaces
+`run_fake_test_sequence()` in a later iteration — everything around it
+(heartbeat, job polling, progress/measurement reporting) is the real,
+permanent shape of how that will plug in.
 
 ## Setup (Raspberry Pi)
 
