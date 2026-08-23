@@ -1,5 +1,6 @@
 {
   "api_base_url": "https://sslhnjxdavkzktpnrivn.supabase.co",
   "slug": "luqa-pixel-lme01",
-  "token": "paste the one-time token shown by LUQA's Add New LUQA Bench flow here"
+  "token": "paste the one-time token shown by LUQA's Add New LUQA Bench flow here",
+  "device_iface": null
 }
