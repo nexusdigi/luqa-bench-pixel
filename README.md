@@ -115,5 +115,14 @@ concrete test once a poster is wired up to a bench.
 
 ## Running as a service (optional)
 
-For a real deployment, run this under systemd so it survives reboots — not
-set up yet in this repo.
+For a real deployment, run this under systemd so it survives reboots:
+
+```bash
+sudo cp luqa-bench-pixel.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now luqa-bench-pixel
+journalctl -u luqa-bench-pixel -f   # follow logs
+```
+
+Edit `luqa-bench-pixel.service` first if you didn't clone this into the
+default `pi` user's home directory — check `User=`/`WorkingDirectory=`.

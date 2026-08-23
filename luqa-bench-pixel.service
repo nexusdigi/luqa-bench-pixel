@@ -1,0 +1,19 @@
+[Unit]
+Description=LUQA PIXEL bench agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Adjust User/WorkingDirectory if you cloned this somewhere other than the
+# default `pi` user's home directory.
+User=pi
+WorkingDirectory=/home/pi/luqa-bench-pixel
+ExecStart=/usr/bin/node agent.js
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
