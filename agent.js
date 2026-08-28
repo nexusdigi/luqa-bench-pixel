@@ -25,6 +25,7 @@ const { DEFAULT_DEVICE, STEP_ID } = require('./src/ledPoster/ledPosterTypes');
 const { discoverDevices } = require('./src/network/deviceDiscovery');
 
 const HEARTBEAT_INTERVAL_MS = 30_000;
+const JOB_POLL_INTERVAL_MS = 3_000;
 
 const STEP_LABEL = {
   [STEP_ID.PRECHECK]: 'Pre-check',
@@ -158,14 +159,25 @@ async function main() {
   // deliberate infinite loop — the agent's whole job is to run forever,
   // resilient to individual cycle failures (caught below, logged, retried
   // next interval rather than crashing the process).
+  //
+  // Heartbeat and job polling used to share one HEARTBEAT_INTERVAL_MS cycle,
+  // meaning a freshly reserved session could sit unnoticed for up to 30s
+  // before pollJob() ran again — the actual cause of "bench takes a while
+  // to react" reports. Heartbeat only needs to stay comfortably under the
+  // 90s online-staleness window, so it keeps its own 30s cadence; job
+  // polling now runs on its own much tighter loop.
+  let lastHeartbeatAt = 0;
   for (;;) {
     try {
-      await sendHeartbeat(config);
+      if (Date.now() - lastHeartbeatAt >= HEARTBEAT_INTERVAL_MS) {
+        await sendHeartbeat(config);
+        lastHeartbeatAt = Date.now();
+      }
       await pollAndRunJob(config);
     } catch (err) {
       console.error(`[agent] cycle error: ${err.stack || err.message}`);
     }
-    await new Promise((r) => setTimeout(r, HEARTBEAT_INTERVAL_MS));
+    await new Promise((r) => setTimeout(r, JOB_POLL_INTERVAL_MS));
   }
 }
 
