@@ -14,9 +14,20 @@ const CHROMIUM_CANDIDATES = ['chromium-browser', 'chromium', 'chromium-browser-s
 let server = null;
 let browserProc = null;
 
+// What the kiosk page's /state poll currently returns — set via setState(),
+// read by the already-open kiosk tab. Kept entirely in-memory: this is a
+// display cue for whoever's standing at the bench, not data that needs to
+// survive a restart.
+let state = { mode: 'off', color: null, pattern: null };
+
 function startServer() {
   if (server) return;
   server = http.createServer((req, res) => {
+    if (req.url === '/state') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(state));
+      return;
+    }
     res.writeHead(200, { 'Content-Type': 'text/html' });
     res.end(testPatternHtml());
   });
@@ -43,8 +54,12 @@ function findChromiumBinary() {
 }
 
 /**
- * Starts the full-screen color-cycle test pattern on this Pi's own HDMI
- * output. Idempotent — calling while already running is a no-op.
+ * Starts the Chromium kiosk window on this Pi's own HDMI output, if not
+ * already running — idempotent so the caller can call this on every poll
+ * tick while hdmi_test is true without flickering the poster by relaunching
+ * Chromium each time. Actual content (cycle/hold/color/pattern) is driven
+ * separately via setState(), which the already-open kiosk tab picks up on
+ * its own ~300ms poll — this function only owns the browser process.
  *
  * Needs a running display server (X11 or Wayland/labwc, whatever Raspberry
  * Pi OS's default desktop session provides) — DISPLAY defaults to `:0`
@@ -97,6 +112,7 @@ function stopHdmiTest() {
     browserProc = null;
   }
   stopServer();
+  state = { mode: 'off', color: null, pattern: null };
   return { ok: true };
 }
 
@@ -104,4 +120,13 @@ function isHdmiTestRunning() {
   return browserProc !== null;
 }
 
-module.exports = { startHdmiTest, stopHdmiTest, isHdmiTestRunning };
+/**
+ * Updates what the (already-running) kiosk tab shows — the agent calls
+ * this on every poll tick with whatever LUQA's live_control currently says.
+ * Does not touch the Chromium process itself; call startHdmiTest() first.
+ */
+function setHdmiState(next) {
+  state = { mode: next.mode || 'off', color: next.color ?? null, pattern: next.pattern ?? null };
+}
+
+module.exports = { startHdmiTest, stopHdmiTest, isHdmiTestRunning, setHdmiState };

@@ -32,14 +32,19 @@ never mid-test.
   LUQA as the sequence runs, then reports completion — which lands the
   session in `awaiting_confirmation`, not `completed`: a human still has to
   add the visual checks (layout, color/pixel quality, optional HDMI
-  passthrough) in the LUQA web UI before the result is final, same as
-  PanelCheck always required.
-- While waiting on that human confirmation, watches for an HDMI-test
-  start/stop signal from LUQA and, when asked, shows a full-screen
-  color-cycle test pattern on **this Pi's own HDMI output** (`src/hdmiTest/`)
-  — replaces PanelCheck's "second monitor on the operator's laptop" HDMI
-  test now that the bench itself is the thing plugged into the reference
-  monitor. Needs Chromium installed (`sudo apt install -y chromium-browser`)
+  passthrough) in the LUQA web UI before the result is final, same as the
+  legacy poster QA tool always required.
+- While waiting on that human confirmation, watches `progress.live_control`
+  from LUQA and drives a full-screen HDMI test pattern on **this Pi's own
+  HDMI output** (`src/hdmiTest/`) to match — cycling autotest, a solid held
+  color, or one of five CSS patterns (grid/checker/gradient/h-stripes/
+  v-stripes), switched live without relaunching Chromium (a relaunch would
+  flicker the poster). The Chromium kiosk window itself only ever starts
+  once and polls this Pi's own `127.0.0.1:8973/state` every ~300ms; LUQA
+  never talks to the Pi directly — replaces the legacy tool's "second
+  monitor on the operator's laptop" HDMI test now that the bench itself is
+  the thing plugged into the reference monitor. Needs Chromium installed
+  (`sudo apt install -y chromium-browser`)
   and a running desktop session (`DISPLAY`, defaults to `:0`).
 
 The hardware-adapter logic (`src/ledPoster/`, `src/network/`) is ported from

@@ -23,7 +23,7 @@ const { LedPosterClient } = require('./src/ledPoster/ledPosterApi');
 const { runQaSequence } = require('./src/ledPoster/ledPosterQAService');
 const { DEFAULT_DEVICE, STEP_ID } = require('./src/ledPoster/ledPosterTypes');
 const { discoverDevices } = require('./src/network/deviceDiscovery');
-const { startHdmiTest, stopHdmiTest, isHdmiTestRunning } = require('./src/hdmiTest');
+const { startHdmiTest, stopHdmiTest, isHdmiTestRunning, setHdmiState } = require('./src/hdmiTest');
 const { checkForUpdate, applyUpdateAndExit } = require('./src/selfUpdate');
 const { AGENT_VERSION } = require('./src/luqaClient');
 
@@ -166,12 +166,16 @@ async function runLedPosterJob(config, job) {
 }
 
 /**
- * Polls bench-poll-session for progress.live_control.hdmi_test (written by
- * the LUQA web UI via the same setLiveControl()/set_bench_live_control RPC
- * BEAM's aspect-ratio switch uses) and starts/stops the local HDMI test
- * pattern to match. Exits once the session leaves awaiting_confirmation
- * (human confirmed/aborted it) or after HDMI_WAIT_MAX_MS, always leaving
- * the test pattern stopped on the way out.
+ * Polls bench-poll-session for progress.live_control (written by the LUQA
+ * web UI via the same setLiveControl()/set_bench_live_control RPC BEAM's
+ * aspect-ratio switch uses) and drives the local HDMI test pattern to
+ * match — starting/stopping the Chromium kiosk window as needed
+ * (idempotent, never relaunched while already running) and pushing the
+ * current mode/color/pattern into it via setHdmiState() so the already-open
+ * kiosk tab updates without a restart (a relaunch would flicker the
+ * poster). Exits once the session leaves awaiting_confirmation (human
+ * confirmed/aborted it) or after HDMI_WAIT_MAX_MS, always leaving the test
+ * pattern stopped on the way out.
  */
 async function waitForHumanAndServeHdmi(config, sessionId) {
   console.log(`[job] ${sessionId} — awaiting human confirmation, watching for HDMI-test signal…`);
@@ -194,12 +198,15 @@ async function waitForHumanAndServeHdmi(config, sessionId) {
       break;
     }
 
-    const wantHdmi = !!(poll.progress && poll.progress.live_control && poll.progress.live_control.hdmi_test);
-    if (wantHdmi && !isHdmiTestRunning()) {
-      console.log(`[job] ${sessionId} — starting HDMI test pattern`);
-      const started = startHdmiTest(config);
-      if (!started.ok) console.error(`[job] ${sessionId} — HDMI test failed to start: ${started.error}`);
-    } else if (!wantHdmi && isHdmiTestRunning()) {
+    const liveControl = (poll.progress && poll.progress.live_control) || {};
+    if (liveControl.hdmi_test) {
+      if (!isHdmiTestRunning()) {
+        console.log(`[job] ${sessionId} — starting HDMI test pattern`);
+        const started = startHdmiTest(config);
+        if (!started.ok) console.error(`[job] ${sessionId} — HDMI test failed to start: ${started.error}`);
+      }
+      setHdmiState({ mode: liveControl.hdmi_mode || 'cycle', color: liveControl.hdmi_color ?? null, pattern: liveControl.hdmi_pattern ?? null });
+    } else if (isHdmiTestRunning()) {
       console.log(`[job] ${sessionId} — stopping HDMI test pattern`);
       stopHdmiTest();
     }
