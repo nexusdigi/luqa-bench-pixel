@@ -23,11 +23,22 @@ never mid-test.
   "Online" with basic diagnostics (CPU temp, uptime).
 - Polls for a reserved test session after each heartbeat. If LUQA has one,
   it validates the job (a test profile with product width/height/resolution
-  must be configured — see below), accepts it, and runs the **real** 11-step
-  LED poster QA sequence (`src/ledPoster/ledPosterQAService.js`) against the
-  poster: pre-check → soft reset → force standalone → brightness → set
-  resolution → time sync → build test pattern → upload/publish → start
-  playback → optional post-playback monitoring.
+  must be configured — see below), accepts it, then **detects the poster**
+  itself via UDP discovery on its device-facing network and **logs in** with
+  the device's factory-default credentials (admin / SN2008@+ — public
+  knowledge, printed on every unit, not a secret) before running the
+  **real** 11-step LED poster QA sequence
+  (`src/ledPoster/ledPosterQAService.js`): pre-check → soft reset → force
+  standalone → brightness → set resolution → time sync → build test pattern
+  → upload/publish → start playback → optional post-playback monitoring.
+  Detect/login/every QA step is reported back to LUQA live, so the operator
+  watches the whole thing happen in real time instead of staring at a
+  generic "waiting" spinner.
+- **Demo mode**: if LUQA starts a session with "Add Demo FOLDSTER 1.8", the
+  agent fabricates the entire sequence (`runDemoJob()` in `agent.js`) —
+  same detect/login/step-by-step shape, same timing feel, no real network
+  or hardware call — so the LUQA-side workflow can be exercised/tuned
+  without a poster wired to the bench.
 - Reports step-by-step progress and per-step pass/fail measurements back to
   LUQA as the sequence runs, then reports completion — which lands the
   session in `awaiting_confirmation`, not `completed`: a human still has to
@@ -55,12 +66,13 @@ why this repo is Node.js rather than a scripting-language reference agent.
 ## What's still local vs. what's LUQA-managed
 
 **Local config.json holds only this bench's own identity** — which LUQA
-project to talk to and its own auth token. It does **not** hold the poster's
-IP, login, or product dimensions — that's all LUQA-managed (`benches.default_device`
-+ `bench_test_profiles`, editable in LUQA's UI) and delivered to the agent
-as part of the job payload when it polls. If no fixed device IP is
-configured in LUQA, the agent falls back to UDP discovery on its local
-network to find the poster automatically.
+project to talk to and its own auth token. Product dimensions come from
+LUQA (`bench_test_profiles`, editable in LUQA's UI) as part of the job
+payload when the agent polls. The poster's IP and login are never
+configured anywhere — the agent always finds the poster itself via UDP
+discovery on its device-facing network and always logs in with the
+device's factory-default credentials (`admin` / `SN2008@+`, see
+`ledPosterTypes.js`'s `DEFAULT_DEVICE`).
 
 ## Setup (Raspberry Pi)
 

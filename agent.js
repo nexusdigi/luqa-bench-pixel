@@ -6,11 +6,14 @@
  * polls for reserved test sessions, and runs the real LED-poster QA
  * sequence against the poster wired to this bench.
  *
- * Everything about the poster (IP, credentials, product dimensions) comes
- * from the job payload LUQA hands the agent when polling — never from a
- * local config file. Local config.json only identifies *this bench* to
- * LUQA (api_base_url/slug/token). See docs/architecture/
- * luqa-benches-architecture.md §5c in the main LUQA repo.
+ * The poster's IP is never configured anywhere — this agent always finds it
+ * itself via UDP discovery on its device-facing network, and always logs in
+ * with the device's factory-default credentials (admin / SN2008@+, public
+ * knowledge — printed on every unit). Product dimensions still come from the
+ * job payload LUQA hands the agent when polling (bench_test_profiles). Local
+ * config.json only identifies *this bench* to LUQA (api_base_url/slug/
+ * token). See docs/architecture/luqa-benches-architecture.md §5c in the main
+ * LUQA repo.
  *
  * Usage:
  *   npm install
@@ -21,7 +24,7 @@
 const { loadConfig, sendHeartbeat, pollJob, respondJob, reportProgress, reportMeasurements, completeSession, reportAbort, pollSession } = require('./src/luqaClient');
 const { LedPosterClient } = require('./src/ledPoster/ledPosterApi');
 const { runQaSequence } = require('./src/ledPoster/ledPosterQAService');
-const { DEFAULT_DEVICE, STEP_ID } = require('./src/ledPoster/ledPosterTypes');
+const { DEFAULT_DEVICE, STEP_ID, STEP_STATUS } = require('./src/ledPoster/ledPosterTypes');
 const { discoverDevices } = require('./src/network/deviceDiscovery');
 const { startHdmiTest, stopHdmiTest, isHdmiTestRunning, setHdmiState } = require('./src/hdmiTest');
 const { checkForUpdate, applyUpdateAndExit } = require('./src/selfUpdate');
@@ -46,6 +49,10 @@ function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+// detect/login aren't part of the formal QA sequence (STEP_ID) — they're
+// reported the same way (steps.<id> = {status, info}) but happen once, up
+// front, before runQaSequence even starts. LUQA's PixelPosterRun.tsx has its
+// own matching CONNECT_STEPS labels — keep both in sync.
 const STEP_LABEL = {
   [STEP_ID.PRECHECK]: 'Pre-check',
   [STEP_ID.FACTORY_RESET]: 'Factory reset',
@@ -69,23 +76,16 @@ function validateJob(job) {
 }
 
 /**
- * Resolve which physical device to talk to: use the LUQA-configured
- * default_device.ip if set, otherwise run UDP discovery on this bench's
- * network (see src/network/deviceDiscovery.js) and take the first reply.
+ * Resolve which physical device to talk to: always UDP discovery on this
+ * bench's device-facing network (see src/network/deviceDiscovery.js), first
+ * reply wins. No per-bench IP override anymore — the operator watches this
+ * happen live in LUQA (the 'detect' progress step) instead of pre-configuring
+ * it. Login always uses the device's factory-default credentials
+ * (DEFAULT_DEVICE — admin / SN2008@+, public knowledge, printed on every
+ * unit) since LUQA no longer stores/delivers per-device credentials either.
  */
-async function resolveDevice(deviceConfig) {
-  const cfg = deviceConfig || {};
-  if (cfg.ip) {
-    return {
-      ip: cfg.ip,
-      port: cfg.port || DEFAULT_DEVICE.port,
-      protocol: cfg.protocol || DEFAULT_DEVICE.protocol,
-      username: cfg.username || DEFAULT_DEVICE.username,
-      password: cfg.password || DEFAULT_DEVICE.password,
-    };
-  }
-
-  console.log('[job] no fixed device IP configured — discovering on the local network…');
+async function resolveDevice() {
+  console.log('[job] discovering the poster on the local network…');
   const found = await discoverDevices({});
   if (!found.ok || !found.devices.length) {
     return null;
@@ -94,33 +94,25 @@ async function resolveDevice(deviceConfig) {
   console.log(`[job] discovered device at ${d.ip}:${d.port} (sn=${d.sn || '?'})`);
   return {
     ip: d.ip,
-    port: d.port,
-    protocol: cfg.protocol || DEFAULT_DEVICE.protocol,
-    username: cfg.username || DEFAULT_DEVICE.username,
-    password: cfg.password || DEFAULT_DEVICE.password,
+    port: d.port || DEFAULT_DEVICE.port,
+    protocol: DEFAULT_DEVICE.protocol,
+    username: DEFAULT_DEVICE.username,
+    password: DEFAULT_DEVICE.password,
+    sn: d.sn || null,
   };
 }
 
 async function runLedPosterJob(config, job) {
   const sessionId = job.session_id;
+
+  // "Add Demo FOLDSTER 1.8" in LUQA — exercises the whole detect -> login ->
+  // QA-step -> HDMI -> confirm workflow against a fabricated device, no real
+  // hardware touched, for testing/optimizing the LUQA-side flow.
+  if (job.is_demo) {
+    return runDemoJob(config, sessionId);
+  }
+
   const product = job.test_profile.parameters;
-
-  const device = await resolveDevice(job.device);
-  if (!device) {
-    console.error('[job] no device found (fixed IP unset and discovery found nothing) — aborting');
-    await reportAbort(config, sessionId, 'No poster device found — check the cable/network and default_device config in LUQA.');
-    return;
-  }
-
-  const client = new LedPosterClient({ ip: device.ip, port: device.port, protocol: device.protocol });
-  const loginCreds = { username: device.username, password: device.password };
-
-  const login = await client.login(loginCreds);
-  if (!login.ok) {
-    console.error(`[job] login to ${device.ip} failed: ${login.error}`);
-    await reportAbort(config, sessionId, `Login to poster at ${device.ip} failed: ${login.error}`);
-    return;
-  }
 
   const steps = {};
   const onProgress = (stepId, status, info) => {
@@ -131,6 +123,29 @@ async function runLedPosterJob(config, job) {
     // would serialize network round-trips into the QA sequence's own timing.
     void reportProgress(config, sessionId, steps);
   };
+
+  onProgress('detect', STEP_STATUS.RUNNING);
+  const device = await resolveDevice();
+  if (!device) {
+    onProgress('detect', STEP_STATUS.FAILED);
+    console.error('[job] no device found (discovery found nothing) — aborting');
+    await reportAbort(config, sessionId, 'No poster device found — check the cable/network on the bench\'s device segment.');
+    return;
+  }
+  onProgress('detect', STEP_STATUS.DONE, { ip: device.ip, sn: device.sn });
+
+  const client = new LedPosterClient({ ip: device.ip, port: device.port, protocol: device.protocol });
+  const loginCreds = { username: device.username, password: device.password };
+
+  onProgress('login', STEP_STATUS.RUNNING);
+  const login = await client.login(loginCreds);
+  if (!login.ok) {
+    onProgress('login', STEP_STATUS.FAILED);
+    console.error(`[job] login to ${device.ip} failed: ${login.error}`);
+    await reportAbort(config, sessionId, `Login to poster at ${device.ip} failed: ${login.error}`);
+    return;
+  }
+  onProgress('login', STEP_STATUS.DONE);
 
   const result = await runQaSequence(
     client,
@@ -154,12 +169,73 @@ async function runLedPosterJob(config, job) {
   // The automated sequence's own result is only the preliminary verdict —
   // completeSession lands the session in awaiting_confirmation, not
   // completed, exactly so a human can add the visual checks (layout,
-  // color/pixel quality, optional HDMI passthrough) that PanelCheck always
-  // required before a poster actually passed. Those checks happen in the
-  // LUQA web UI now, not on this Pi — but the optional HDMI test pattern
-  // itself has to come from the Pi's own HDMI output (that's the whole
-  // point), so this agent sticks around watching for the LUQA-side
-  // start/stop signal until a human confirms (or the wait times out).
+  // color/pixel quality, optional HDMI passthrough) the legacy poster QA
+  // tool always required before a poster actually passed. Those checks
+  // happen in the LUQA web UI now, not on this Pi — but the optional HDMI
+  // test pattern itself has to come from the Pi's own HDMI output (that's
+  // the whole point), so this agent sticks around watching for the
+  // LUQA-side start/stop signal until a human confirms (or the wait times
+  // out).
+  if (completion && completion.status === 'awaiting_confirmation') {
+    await waitForHumanAndServeHdmi(config, sessionId);
+  }
+}
+
+// Fabricated device identity for "Add Demo FOLDSTER 1.8" — a name, not a
+// real serial format, so it can never be mistaken for an actual unit.
+const DEMO_DEVICE = { ip: '10.20.0.42', sn: 'FOLDSTER-DEMO-001' };
+const DEMO_STEP_DELAY_MS = 700;
+
+/**
+ * Runs the exact same detect -> login -> QA-step -> awaiting_confirmation ->
+ * HDMI shape as runLedPosterJob, but against nothing real: fabricated
+ * detect/login, then every QA step reported done with a short delay and a
+ * synthetic passing measurement. Lets an operator exercise/tune the whole
+ * LUQA-side workflow without a poster wired to the bench. factory_reset is
+ * reported skipped, same as the real sequence does when doFactoryReset is
+ * false (see ledPosterQAService.js).
+ */
+async function runDemoJob(config, sessionId) {
+  console.log(`[job] ${sessionId} — demo mode, no real device involved`);
+  const steps = {};
+  const onProgress = (stepId, status, info) => {
+    steps[stepId] = { status, ...(info ? { info } : {}) };
+    void reportProgress(config, sessionId, steps);
+  };
+
+  onProgress('detect', STEP_STATUS.RUNNING);
+  await sleep(DEMO_STEP_DELAY_MS);
+  onProgress('detect', STEP_STATUS.DONE, { ip: DEMO_DEVICE.ip, sn: DEMO_DEVICE.sn });
+
+  onProgress('login', STEP_STATUS.RUNNING);
+  await sleep(DEMO_STEP_DELAY_MS);
+  onProgress('login', STEP_STATUS.DONE);
+
+  onProgress(STEP_ID.FACTORY_RESET, STEP_STATUS.SKIPPED);
+
+  const qaSteps = [
+    STEP_ID.PRECHECK,
+    STEP_ID.SOFT_RESET,
+    STEP_ID.FORCE_STANDALONE,
+    STEP_ID.BRIGHTNESS,
+    STEP_ID.RESOLUTION,
+    STEP_ID.TIME,
+    STEP_ID.BUILD_PATTERN,
+    STEP_ID.UPLOAD_PUBLISH,
+    STEP_ID.PLAYBACK_START,
+    STEP_ID.MONITOR,
+  ];
+  const measurements = [];
+  for (const stepId of qaSteps) {
+    onProgress(stepId, STEP_STATUS.RUNNING);
+    await sleep(DEMO_STEP_DELAY_MS);
+    onProgress(stepId, STEP_STATUS.DONE);
+    measurements.push({ key: stepId, label: STEP_LABEL[stepId] || stepId, value: null, unit: null, pass: true, raw: { demo: true } });
+  }
+  await reportMeasurements(config, sessionId, measurements);
+
+  const completion = await completeSession(config, sessionId, 'pass');
+  if (completion) console.log(`[job] ${sessionId} — demo done, status=${completion.status}`);
   if (completion && completion.status === 'awaiting_confirmation') {
     await waitForHumanAndServeHdmi(config, sessionId);
   }
