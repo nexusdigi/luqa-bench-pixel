@@ -1,6 +1,6 @@
 {
   "name": "luqa-bench-pixel",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "description": "LUQA PIXEL bench agent — runs on a Raspberry Pi wired to LED poster test hardware",
   "main": "agent.js",

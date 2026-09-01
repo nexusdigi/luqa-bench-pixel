@@ -143,6 +143,16 @@ async function reportAbort(config, sessionId, reason) {
   return call(config, 'bench-report-abort', { slug: config.slug, session_id: sessionId, reason });
 }
 
+/**
+ * Read-only status/progress check — used after the automated sequence hands
+ * off to the human (session sits in awaiting_confirmation) to watch for the
+ * LUQA-side HDMI-test start/stop signal in progress.live_control, the same
+ * poll-and-react shape luqa-bench-beam's live loop uses.
+ */
+async function pollSession(config, sessionId) {
+  return call(config, 'bench-poll-session', { slug: config.slug, session_id: sessionId });
+}
+
 module.exports = {
   loadConfig,
   call,
@@ -153,5 +163,6 @@ module.exports = {
   reportMeasurements,
   completeSession,
   reportAbort,
+  pollSession,
   AGENT_VERSION,
 };

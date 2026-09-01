@@ -7,6 +7,16 @@ directly. Full architecture and the API contract this agent implements: see
 [`docs/architecture/luqa-benches-architecture.md`](https://github.com/nexusdigi/LUQA/blob/main/docs/architecture/luqa-benches-architecture.md)
 in the main LUQA repo.
 
+## Self-update
+
+Between job cycles, the agent checks whether `package.json` on `origin/main`
+has a different version than what's currently running (`src/selfUpdate.js`).
+If so, it does a `git pull` + `npm install` and exits — the systemd unit's
+`Restart=always` brings the new code straight back up. Means a change
+pushed to `main` reaches every bench in the fleet within ~10 minutes, no
+manual SSH-in-and-pull per bench. Only ever checked/applied between jobs,
+never mid-test.
+
 ## What this does
 
 - Heartbeats to LUQA every 30s (`agent.js`) so the bench shows up as
@@ -19,7 +29,18 @@ in the main LUQA repo.
   resolution → time sync → build test pattern → upload/publish → start
   playback → optional post-playback monitoring.
 - Reports step-by-step progress and per-step pass/fail measurements back to
-  LUQA as the sequence runs, then reports completion.
+  LUQA as the sequence runs, then reports completion — which lands the
+  session in `awaiting_confirmation`, not `completed`: a human still has to
+  add the visual checks (layout, color/pixel quality, optional HDMI
+  passthrough) in the LUQA web UI before the result is final, same as
+  PanelCheck always required.
+- While waiting on that human confirmation, watches for an HDMI-test
+  start/stop signal from LUQA and, when asked, shows a full-screen
+  color-cycle test pattern on **this Pi's own HDMI output** (`src/hdmiTest/`)
+  — replaces PanelCheck's "second monitor on the operator's laptop" HDMI
+  test now that the bench itself is the thing plugged into the reference
+  monitor. Needs Chromium installed (`sudo apt install -y chromium-browser`)
+  and a running desktop session (`DISPLAY`, defaults to `:0`).
 
 The hardware-adapter logic (`src/ledPoster/`, `src/network/`) is ported from
 LUQA's previously separate LED-poster QA tooling, adapted to run headless on

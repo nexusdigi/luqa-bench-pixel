@@ -18,14 +18,33 @@
  *   node agent.js
  */
 
-const { loadConfig, sendHeartbeat, pollJob, respondJob, reportProgress, reportMeasurements, completeSession, reportAbort } = require('./src/luqaClient');
+const { loadConfig, sendHeartbeat, pollJob, respondJob, reportProgress, reportMeasurements, completeSession, reportAbort, pollSession } = require('./src/luqaClient');
 const { LedPosterClient } = require('./src/ledPoster/ledPosterApi');
 const { runQaSequence } = require('./src/ledPoster/ledPosterQAService');
 const { DEFAULT_DEVICE, STEP_ID } = require('./src/ledPoster/ledPosterTypes');
 const { discoverDevices } = require('./src/network/deviceDiscovery');
+const { startHdmiTest, stopHdmiTest, isHdmiTestRunning } = require('./src/hdmiTest');
+const { checkForUpdate, applyUpdateAndExit } = require('./src/selfUpdate');
+const { AGENT_VERSION } = require('./src/luqaClient');
 
 const HEARTBEAT_INTERVAL_MS = 30_000;
 const JOB_POLL_INTERVAL_MS = 3_000;
+const HDMI_POLL_INTERVAL_MS = 2_000;
+// A pushed test-flow change should reach every bench in the fleet without
+// anyone SSHing in — checked between job cycles only (see main()), never
+// mid-test. 10 minutes balances "changes land quickly" against not
+// hammering GitHub's raw-content CDN across a growing number of benches.
+const UPDATE_CHECK_INTERVAL_MS = 10 * 60_000;
+// Upper bound on how long the agent keeps polling for HDMI-test start/stop
+// signals after handing off to the human — not a hard deadline on the human
+// (the bench stays reserved via the partial unique index on
+// automated_test_sessions regardless), just a point past which this agent
+// process stops spending cycles on a session someone forgot to confirm.
+const HDMI_WAIT_MAX_MS = 30 * 60_000;
+
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
 
 const STEP_LABEL = {
   [STEP_ID.PRECHECK]: 'Pre-check',
@@ -131,6 +150,64 @@ async function runLedPosterJob(config, job) {
 
   const completion = await completeSession(config, sessionId, result.ok ? 'pass' : 'fail');
   if (completion) console.log(`[job] ${sessionId} — done, status=${completion.status}`);
+
+  // The automated sequence's own result is only the preliminary verdict —
+  // completeSession lands the session in awaiting_confirmation, not
+  // completed, exactly so a human can add the visual checks (layout,
+  // color/pixel quality, optional HDMI passthrough) that PanelCheck always
+  // required before a poster actually passed. Those checks happen in the
+  // LUQA web UI now, not on this Pi — but the optional HDMI test pattern
+  // itself has to come from the Pi's own HDMI output (that's the whole
+  // point), so this agent sticks around watching for the LUQA-side
+  // start/stop signal until a human confirms (or the wait times out).
+  if (completion && completion.status === 'awaiting_confirmation') {
+    await waitForHumanAndServeHdmi(config, sessionId);
+  }
+}
+
+/**
+ * Polls bench-poll-session for progress.live_control.hdmi_test (written by
+ * the LUQA web UI via the same setLiveControl()/set_bench_live_control RPC
+ * BEAM's aspect-ratio switch uses) and starts/stops the local HDMI test
+ * pattern to match. Exits once the session leaves awaiting_confirmation
+ * (human confirmed/aborted it) or after HDMI_WAIT_MAX_MS, always leaving
+ * the test pattern stopped on the way out.
+ */
+async function waitForHumanAndServeHdmi(config, sessionId) {
+  console.log(`[job] ${sessionId} — awaiting human confirmation, watching for HDMI-test signal…`);
+  const start = Date.now();
+  let lastHeartbeatAt = Date.now();
+
+  while (Date.now() - start < HDMI_WAIT_MAX_MS) {
+    if (Date.now() - lastHeartbeatAt >= HEARTBEAT_INTERVAL_MS) {
+      await sendHeartbeat(config);
+      lastHeartbeatAt = Date.now();
+    }
+
+    const poll = await pollSession(config, sessionId);
+    if (!poll) {
+      await sleep(HDMI_POLL_INTERVAL_MS);
+      continue;
+    }
+    if (poll.status !== 'awaiting_confirmation') {
+      console.log(`[job] ${sessionId} — session left awaiting_confirmation (status=${poll.status}), stopping HDMI watch`);
+      break;
+    }
+
+    const wantHdmi = !!(poll.progress && poll.progress.live_control && poll.progress.live_control.hdmi_test);
+    if (wantHdmi && !isHdmiTestRunning()) {
+      console.log(`[job] ${sessionId} — starting HDMI test pattern`);
+      const started = startHdmiTest(config);
+      if (!started.ok) console.error(`[job] ${sessionId} — HDMI test failed to start: ${started.error}`);
+    } else if (!wantHdmi && isHdmiTestRunning()) {
+      console.log(`[job] ${sessionId} — stopping HDMI test pattern`);
+      stopHdmiTest();
+    }
+
+    await sleep(HDMI_POLL_INTERVAL_MS);
+  }
+
+  stopHdmiTest();
 }
 
 async function pollAndRunJob(config) {
@@ -167,6 +244,7 @@ async function main() {
   // 90s online-staleness window, so it keeps its own 30s cadence; job
   // polling now runs on its own much tighter loop.
   let lastHeartbeatAt = 0;
+  let lastUpdateCheckAt = 0;
   for (;;) {
     try {
       if (Date.now() - lastHeartbeatAt >= HEARTBEAT_INTERVAL_MS) {
@@ -174,6 +252,17 @@ async function main() {
         lastHeartbeatAt = Date.now();
       }
       await pollAndRunJob(config);
+
+      // Only ever checked/applied here, between job cycles — never while a
+      // test is running (pollAndRunJob has already returned by this point).
+      if (Date.now() - lastUpdateCheckAt >= UPDATE_CHECK_INTERVAL_MS) {
+        lastUpdateCheckAt = Date.now();
+        const update = await checkForUpdate(AGENT_VERSION);
+        if (update.available) {
+          console.log(`[update] ${update.currentVersion} -> ${update.remoteVersion} available, updating…`);
+          applyUpdateAndExit(); // does not return on success
+        }
+      }
     } catch (err) {
       console.error(`[agent] cycle error: ${err.stack || err.message}`);
     }
